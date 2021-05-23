@@ -24,17 +24,23 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 
-	monitoringv1 "github.com/coreos/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/kylelemons/godebug/pretty"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	"github.com/prometheus-operator/prometheus-operator/pkg/operator"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var (
 	defaultTestConfig = Config{
-		ConfigReloaderImage:    "jimmidyson/configmap-reload:latest",
-		ConfigReloaderCPU:      "100m",
-		ConfigReloaderMemory:   "25Mi",
+		ReloaderConfig: operator.ReloaderConfig{
+			Image:         "quay.io/prometheus-operator/prometheus-config-reloader:latest",
+			CPURequest:    "100m",
+			CPULimit:      "100m",
+			MemoryRequest: "50Mi",
+			MemoryLimit:   "50Mi",
+		},
 		ThanosDefaultBaseImage: "quay.io/thanos/thanos",
 	}
 	emptyQueryEndpoints = []string{""}
@@ -61,9 +67,7 @@ func TestStatefulSetLabelingAndAnnotations(t *testing.T) {
 			Labels:      labels,
 			Annotations: annotations,
 		},
-		Spec: monitoringv1.ThanosRulerSpec{
-			QueryEndpoints: emptyQueryEndpoints,
-		},
+		Spec: monitoringv1.ThanosRulerSpec{QueryEndpoints: emptyQueryEndpoints},
 	}, defaultTestConfig, nil, "")
 
 	require.NoError(t, err)
@@ -90,19 +94,44 @@ func TestPodLabelsAnnotations(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{},
 		Spec: monitoringv1.ThanosRulerSpec{
 			QueryEndpoints: emptyQueryEndpoints,
-			PodMetadata: &monitoringv1.PodMeta{
+			PodMetadata: &monitoringv1.EmbeddedObjectMetadata{
 				Annotations: annotations,
 				Labels:      labels,
 			},
 		},
 	}, defaultTestConfig, nil, "")
 	require.NoError(t, err)
-	if _, ok := sset.Spec.Template.ObjectMeta.Labels["testlabel"]; !ok {
-		t.Fatal("Pod labes are not properly propagated")
+	if val, ok := sset.Spec.Template.ObjectMeta.Labels["testlabel"]; !ok || val != "testvalue" {
+		t.Fatal("Pod labels are not properly propagated")
 	}
-	if !reflect.DeepEqual(annotations, sset.Spec.Template.ObjectMeta.Annotations) {
-		t.Fatal("Pod annotaitons are not properly propagated")
+	if val, ok := sset.Spec.Template.ObjectMeta.Annotations["testannotation"]; !ok || val != "testvalue" {
+		t.Fatal("Pod annotations are not properly propagated")
 	}
+}
+
+func TestThanosDefaultBaseImageFlag(t *testing.T) {
+	thanosBaseImageConfig := Config{
+		ReloaderConfig: operator.ReloaderConfig{
+			Image:         "quay.io/prometheus-operator/prometheus-config-reloader:latest",
+			CPURequest:    "100m",
+			CPULimit:      "100m",
+			MemoryRequest: "50Mi",
+			MemoryLimit:   "50Mi",
+		},
+		ThanosDefaultBaseImage: "nondefaultuseflag/quay.io/thanos/thanos",
+	}
+
+	sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
+		Spec: monitoringv1.ThanosRulerSpec{QueryEndpoints: emptyQueryEndpoints},
+	}, thanosBaseImageConfig, nil, "")
+	require.NoError(t, err)
+
+	image := sset.Spec.Template.Spec.Containers[0].Image
+	expected := "nondefaultuseflag/quay.io/thanos/thanos" + ":" + operator.DefaultThanosVersion
+	if image != expected {
+		t.Fatalf("Unexpected container image.\n\nExpected: %s\n\nGot: %s", expected, image)
+	}
+
 }
 
 func TestStatefulSetVolumes(t *testing.T) {
@@ -156,9 +185,7 @@ func TestStatefulSetVolumes(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "foo",
 		},
-		Spec: monitoringv1.ThanosRulerSpec{
-			QueryEndpoints: emptyQueryEndpoints,
-		},
+		Spec: monitoringv1.ThanosRulerSpec{QueryEndpoints: emptyQueryEndpoints},
 	}, defaultTestConfig, []string{"rules-configmap-one"}, "")
 	require.NoError(t, err)
 	if !reflect.DeepEqual(expected.Spec.Template.Spec.Volumes, sset.Spec.Template.Spec.Volumes) {
@@ -268,6 +295,38 @@ func TestObjectStorage(t *testing.T) {
 	}
 }
 
+func TestObjectStorageFile(t *testing.T) {
+	testPath := "/vault/secret/config.yaml"
+	sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
+		ObjectMeta: metav1.ObjectMeta{},
+		Spec: monitoringv1.ThanosRulerSpec{
+			QueryEndpoints:          emptyQueryEndpoints,
+			ObjectStorageConfigFile: &testPath,
+		},
+	}, defaultTestConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	{
+		var containsArg bool
+		expectedArg := "--objstore.config-file=" + testPath
+		for _, container := range sset.Spec.Template.Spec.Containers {
+			if container.Name == "thanos-ruler" {
+				for _, arg := range container.Args {
+					if arg == expectedArg {
+						containsArg = true
+						break
+					}
+				}
+			}
+		}
+		if !containsArg {
+			t.Fatalf("Thanos ruler is missing expected argument: %s", expectedArg)
+		}
+	}
+}
+
 func TestLabelsAndAlertDropLabels(t *testing.T) {
 	labelPrefix := "--label="
 	alertDropLabelPrefix := "--alert.label-drop="
@@ -322,7 +381,7 @@ func TestLabelsAndAlertDropLabels(t *testing.T) {
 		sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
 			ObjectMeta: metav1.ObjectMeta{},
 			Spec: monitoringv1.ThanosRulerSpec{
-				QueryEndpoints:  []string{""},
+				QueryEndpoints:  emptyQueryEndpoints,
 				Labels:          tc.Labels,
 				AlertDropLabels: tc.AlertDropLabels,
 			},
@@ -509,5 +568,324 @@ func TestPodTemplateConfig(t *testing.T) {
 	}
 	if sset.Spec.Template.Spec.ServiceAccountName != serviceAccountName {
 		t.Fatalf("expected service account name to match, want %s, got %s", serviceAccountName, sset.Spec.Template.Spec.ServiceAccountName)
+	}
+}
+
+func TestExternalQueryURL(t *testing.T) {
+	sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
+		Spec: monitoringv1.ThanosRulerSpec{
+			AlertQueryURL:  "https://example.com/",
+			QueryEndpoints: emptyQueryEndpoints,
+		},
+	}, defaultTestConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	if sset.Spec.Template.Spec.Containers[0].Name != "thanos-ruler" {
+		t.Fatalf("expected 1st containers to be thanos-ruler, got %s", sset.Spec.Template.Spec.Containers[0].Name)
+	}
+
+	const expectedArg = "--alert.query-url=https://example.com/"
+	for _, arg := range sset.Spec.Template.Spec.Containers[0].Args {
+		if arg == expectedArg {
+			return
+		}
+	}
+	t.Fatalf("Thanos ruler is missing expected argument: %s", expectedArg)
+}
+
+func TestSidecarsNoResources(t *testing.T) {
+	testConfig := Config{
+		ReloaderConfig: operator.ReloaderConfig{
+			CPURequest:    "0",
+			CPULimit:      "0",
+			MemoryRequest: "0",
+			MemoryLimit:   "0",
+			Image:         "quay.io/prometheus-operator/prometheus-config-reloader:latest",
+		},
+		ThanosDefaultBaseImage: "quay.io/thanos/thanos:v0.7.0",
+	}
+	sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
+		Spec: monitoringv1.ThanosRulerSpec{QueryEndpoints: emptyQueryEndpoints},
+	}, testConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	expectedResources := v1.ResourceRequirements{
+		Limits:   v1.ResourceList{},
+		Requests: v1.ResourceList{},
+	}
+	for _, c := range sset.Spec.Template.Spec.Containers {
+		if (c.Name == "prometheus-config-reloader" || c.Name == "rules-configmap-reloader") && !reflect.DeepEqual(c.Resources, expectedResources) {
+			t.Fatalf("Expected resource requests/limits:\n\n%s\n\nGot:\n\n%s", expectedResources.String(), c.Resources.String())
+		}
+	}
+}
+
+func TestSidecarsNoRequests(t *testing.T) {
+	testConfig := Config{
+		ReloaderConfig: operator.ReloaderConfig{
+			CPURequest:    "0",
+			CPULimit:      "100m",
+			MemoryRequest: "0",
+			MemoryLimit:   "50Mi",
+			Image:         "quay.io/prometheus-operator/prometheus-config-reloader:latest",
+		},
+		ThanosDefaultBaseImage: "quay.io/thanos/thanos:v0.7.0",
+	}
+	sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
+		Spec: monitoringv1.ThanosRulerSpec{QueryEndpoints: emptyQueryEndpoints},
+	}, testConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	expectedResources := v1.ResourceRequirements{
+		Limits: v1.ResourceList{
+			v1.ResourceCPU:    resource.MustParse("100m"),
+			v1.ResourceMemory: resource.MustParse("50Mi"),
+		},
+		Requests: v1.ResourceList{},
+	}
+	for _, c := range sset.Spec.Template.Spec.Containers {
+		if (c.Name == "prometheus-config-reloader" || c.Name == "rules-configmap-reloader") && !reflect.DeepEqual(c.Resources, expectedResources) {
+			t.Fatalf("Expected resource requests/limits:\n\n%s\n\nGot:\n\n%s", expectedResources.String(), c.Resources.String())
+		}
+	}
+}
+
+func TestSidecarsNoLimits(t *testing.T) {
+	testConfig := Config{
+		ReloaderConfig: operator.ReloaderConfig{
+			CPURequest:    "100m",
+			CPULimit:      "0",
+			MemoryRequest: "50Mi",
+			MemoryLimit:   "0",
+			Image:         "quay.io/prometheus-operator/prometheus-config-reloader:latest",
+		},
+		ThanosDefaultBaseImage: "quay.io/thanos/thanos:v0.7.0",
+	}
+	sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
+		Spec: monitoringv1.ThanosRulerSpec{QueryEndpoints: emptyQueryEndpoints},
+	}, testConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	expectedResources := v1.ResourceRequirements{
+		Limits: v1.ResourceList{},
+		Requests: v1.ResourceList{
+			v1.ResourceCPU:    resource.MustParse("100m"),
+			v1.ResourceMemory: resource.MustParse("50Mi"),
+		},
+	}
+	for _, c := range sset.Spec.Template.Spec.Containers {
+		if (c.Name == "prometheus-config-reloader" || c.Name == "rules-configmap-reloader") && !reflect.DeepEqual(c.Resources, expectedResources) {
+			t.Fatalf("Expected resource requests/limits:\n\n%s\n\nGot:\n\n%s", expectedResources.String(), c.Resources.String())
+		}
+	}
+}
+
+func TestSidecarsNoCPUResources(t *testing.T) {
+	testConfig := Config{
+		ReloaderConfig: operator.ReloaderConfig{
+			CPURequest:    "0",
+			CPULimit:      "0",
+			MemoryRequest: "50Mi",
+			MemoryLimit:   "50Mi",
+			Image:         "quay.io/prometheus-operator/prometheus-config-reloader:latest",
+		},
+		ThanosDefaultBaseImage: "quay.io/thanos/thanos:v0.7.0",
+	}
+	sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
+		Spec: monitoringv1.ThanosRulerSpec{QueryEndpoints: emptyQueryEndpoints},
+	}, testConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	expectedResources := v1.ResourceRequirements{
+		Limits: v1.ResourceList{
+			v1.ResourceMemory: resource.MustParse("50Mi"),
+		},
+		Requests: v1.ResourceList{
+			v1.ResourceMemory: resource.MustParse("50Mi"),
+		},
+	}
+	for _, c := range sset.Spec.Template.Spec.Containers {
+		if (c.Name == "prometheus-config-reloader" || c.Name == "rules-configmap-reloader") && !reflect.DeepEqual(c.Resources, expectedResources) {
+			t.Fatalf("Expected resource requests/limits:\n\n%s\n\nGot:\n\n%s", expectedResources.String(), c.Resources.String())
+		}
+	}
+}
+
+func TestSidecarsNoCPURequests(t *testing.T) {
+	testConfig := Config{
+		ReloaderConfig: operator.ReloaderConfig{
+			CPURequest:    "0",
+			CPULimit:      "100m",
+			MemoryRequest: "50Mi",
+			MemoryLimit:   "50Mi",
+			Image:         "quay.io/prometheus-operator/prometheus-config-reloader:latest",
+		},
+		ThanosDefaultBaseImage: "quay.io/thanos/thanos:v0.7.0",
+	}
+	sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
+		Spec: monitoringv1.ThanosRulerSpec{QueryEndpoints: emptyQueryEndpoints},
+	}, testConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	expectedResources := v1.ResourceRequirements{
+		Limits: v1.ResourceList{
+			v1.ResourceCPU:    resource.MustParse("100m"),
+			v1.ResourceMemory: resource.MustParse("50Mi"),
+		},
+		Requests: v1.ResourceList{
+			v1.ResourceMemory: resource.MustParse("50Mi"),
+		},
+	}
+	for _, c := range sset.Spec.Template.Spec.Containers {
+		if (c.Name == "prometheus-config-reloader" || c.Name == "rules-configmap-reloader") && !reflect.DeepEqual(c.Resources, expectedResources) {
+			t.Fatalf("Expected resource requests/limits:\n\n%s\n\nGot:\n\n%s", expectedResources.String(), c.Resources.String())
+		}
+	}
+}
+
+func TestSidecarsNoCPULimits(t *testing.T) {
+	testConfig := Config{
+		ReloaderConfig: operator.ReloaderConfig{
+			CPURequest:    "100m",
+			CPULimit:      "0",
+			MemoryRequest: "50Mi",
+			MemoryLimit:   "50Mi",
+			Image:         "quay.io/prometheus-operator/prometheus-config-reloader:latest",
+		},
+		ThanosDefaultBaseImage: "quay.io/thanos/thanos:v0.7.0",
+	}
+	sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
+		Spec: monitoringv1.ThanosRulerSpec{QueryEndpoints: emptyQueryEndpoints},
+	}, testConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	expectedResources := v1.ResourceRequirements{
+		Limits: v1.ResourceList{
+			v1.ResourceMemory: resource.MustParse("50Mi"),
+		},
+		Requests: v1.ResourceList{
+			v1.ResourceCPU:    resource.MustParse("100m"),
+			v1.ResourceMemory: resource.MustParse("50Mi"),
+		},
+	}
+	for _, c := range sset.Spec.Template.Spec.Containers {
+		if (c.Name == "prometheus-config-reloader" || c.Name == "rules-configmap-reloader") && !reflect.DeepEqual(c.Resources, expectedResources) {
+			t.Fatalf("Expected resource requests/limits:\n\n%s\n\nGot:\n\n%s", expectedResources.String(), c.Resources.String())
+		}
+	}
+}
+
+func TestSidecarsNoMemoryResources(t *testing.T) {
+	testConfig := Config{
+		ReloaderConfig: operator.ReloaderConfig{
+			Image:         "quay.io/prometheus-operator/prometheus-config-reloader:latest",
+			CPURequest:    "100m",
+			CPULimit:      "100m",
+			MemoryRequest: "0",
+			MemoryLimit:   "0",
+		},
+		ThanosDefaultBaseImage: "quay.io/thanos/thanos:v0.7.0",
+	}
+	sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
+		Spec: monitoringv1.ThanosRulerSpec{QueryEndpoints: emptyQueryEndpoints},
+	}, testConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	expectedResources := v1.ResourceRequirements{
+		Limits: v1.ResourceList{
+			v1.ResourceCPU: resource.MustParse("100m"),
+		},
+		Requests: v1.ResourceList{
+			v1.ResourceCPU: resource.MustParse("100m"),
+		},
+	}
+	for _, c := range sset.Spec.Template.Spec.Containers {
+		if (c.Name == "prometheus-config-reloader" || c.Name == "rules-configmap-reloader") && !reflect.DeepEqual(c.Resources, expectedResources) {
+			t.Fatalf("Expected resource requests/limits:\n\n%s\n\nGot:\n\n%s", expectedResources.String(), c.Resources.String())
+		}
+	}
+}
+
+func TestSidecarsNoMemoryRequests(t *testing.T) {
+	testConfig := Config{
+		ReloaderConfig: operator.ReloaderConfig{
+			Image:         "quay.io/prometheus-operator/prometheus-config-reloader:latest",
+			CPURequest:    "100m",
+			CPULimit:      "100m",
+			MemoryRequest: "0",
+			MemoryLimit:   "50Mi",
+		},
+		ThanosDefaultBaseImage: "quay.io/thanos/thanos:v0.7.0",
+	}
+	sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
+		Spec: monitoringv1.ThanosRulerSpec{QueryEndpoints: emptyQueryEndpoints},
+	}, testConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	expectedResources := v1.ResourceRequirements{
+		Limits: v1.ResourceList{
+			v1.ResourceCPU:    resource.MustParse("100m"),
+			v1.ResourceMemory: resource.MustParse("50Mi"),
+		},
+		Requests: v1.ResourceList{
+			v1.ResourceCPU: resource.MustParse("100m"),
+		},
+	}
+	for _, c := range sset.Spec.Template.Spec.Containers {
+		if (c.Name == "prometheus-config-reloader" || c.Name == "rules-configmap-reloader") && !reflect.DeepEqual(c.Resources, expectedResources) {
+			t.Fatalf("Expected resource requests/limits:\n\n%s\n\nGot:\n\n%s", expectedResources.String(), c.Resources.String())
+		}
+	}
+}
+
+func TestSidecarsNoMemoryLimits(t *testing.T) {
+	testConfig := Config{
+		ReloaderConfig: operator.ReloaderConfig{
+			CPURequest:    "100m",
+			CPULimit:      "100m",
+			MemoryRequest: "50Mi",
+			MemoryLimit:   "0",
+			Image:         "quay.io/prometheus-operator/prometheus-config-reloader:latest",
+		},
+		ThanosDefaultBaseImage: "quay.io/thanos/thanos:v0.7.0",
+	}
+	sset, err := makeStatefulSet(&monitoringv1.ThanosRuler{
+		Spec: monitoringv1.ThanosRulerSpec{QueryEndpoints: emptyQueryEndpoints},
+	}, testConfig, nil, "")
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	expectedResources := v1.ResourceRequirements{
+		Limits: v1.ResourceList{
+			v1.ResourceCPU: resource.MustParse("100m"),
+		},
+		Requests: v1.ResourceList{
+			v1.ResourceCPU:    resource.MustParse("100m"),
+			v1.ResourceMemory: resource.MustParse("50Mi"),
+		},
+	}
+	for _, c := range sset.Spec.Template.Spec.Containers {
+		if (c.Name == "prometheus-config-reloader" || c.Name == "rules-configmap-reloader") && !reflect.DeepEqual(c.Resources, expectedResources) {
+			t.Fatalf("Expected resource requests/limits:\n\n%s\n\nGot:\n\n%s", expectedResources.String(), c.Resources.String())
+		}
 	}
 }

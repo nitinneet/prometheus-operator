@@ -15,12 +15,13 @@
 package e2e
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
 	"testing"
 
-	operatorFramework "github.com/coreos/prometheus-operator/test/framework"
+	operatorFramework "github.com/prometheus-operator/prometheus-operator/test/framework"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -58,7 +59,7 @@ func TestMain(m *testing.M) {
 	opImage = flag.String(
 		"operator-image",
 		"",
-		"operator image, e.g. quay.io/coreos/prometheus-operator",
+		"operator image, e.g. quay.io/prometheus-operator/prometheus-operator",
 	)
 	flag.Parse()
 
@@ -85,7 +86,7 @@ func TestAllNS(t *testing.T) {
 
 	ns := ctx.CreateNamespace(t, framework.KubeClient)
 
-	finalizers, err := framework.CreatePrometheusOperator(ns, *opImage, nil, nil, nil, nil, true)
+	finalizers, err := framework.CreatePrometheusOperator(ns, *opImage, nil, nil, nil, nil, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,12 +95,12 @@ func TestAllNS(t *testing.T) {
 		ctx.AddFinalizerFn(f)
 	}
 
-	t.Run("TestCRDs", testCRDs)
+	t.Run("TestServerTLS", testServerTLS(t, ns))
 
 	// t.Run blocks until the function passed as the second argument (f) returns or
 	// calls t.Parallel to become a parallel test. Run reports whether f succeeded
 	// (or at least did not fail before calling t.Parallel). As all tests in
-	// testAllNS are parallel, the defered ctx.Cleanup above would be run before
+	// testAllNS are parallel, the deferred ctx.Cleanup above would be run before
 	// all tests finished. Wrapping it in testAllNSPrometheus and testAllNSAlertmanager
 	// fixes this.
 	t.Run("x", testAllNSAlertmanager)
@@ -111,7 +112,7 @@ func TestAllNS(t *testing.T) {
 		"app.kubernetes.io/name": "prometheus-operator",
 	})).String()}
 
-	pl, err := framework.KubeClient.CoreV1().Pods(ns).List(opts)
+	pl, err := framework.KubeClient.CoreV1().Pods(ns).List(context.TODO(), opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,8 +123,8 @@ func TestAllNS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to retrieve restart count of Prometheus Operator pod: %v", err)
 	}
-	if len(restarts) != 2 {
-		t.Fatalf("expected to have 2 containers but got %d", len(restarts))
+	if len(restarts) != 1 {
+		t.Fatalf("expected to have 1 container but got %d", len(restarts))
 	}
 	for _, restart := range restarts {
 		if restart != 0 {
@@ -132,27 +133,6 @@ func TestAllNS(t *testing.T) {
 				restart,
 			)
 		}
-	}
-}
-
-func testCRDs(t *testing.T) {
-	const (
-		prometheusCRDName = "prometheuses.monitoring.coreos.com"
-	)
-	crds, err := framework.ListCRDs()
-	if err != nil {
-		t.Fatalf("unable to list CRDs: %v", err)
-	}
-	if len(crds.Items) < 5 {
-		t.Fatalf("incorrect number of CRDs, want at least: %v, got %v", 5, len(crds.Items))
-	}
-	crd, err := framework.GetCRD(prometheusCRDName)
-	if err != nil {
-		t.Fatalf("unable to get prometheus custom resource definition: %v", err)
-	}
-	// This field might be nil in older versions of kube (<1.15)
-	if crd.Spec.PreserveUnknownFields != nil && *crd.Spec.PreserveUnknownFields {
-		t.Fatalf("incorrect setting for preserveUnknownFields, want: %v, got: %v", false, *crd.Spec.PreserveUnknownFields)
 	}
 }
 
@@ -169,6 +149,9 @@ func testAllNSAlertmanager(t *testing.T) {
 		"AMClusterGossipSilences":         testAMClusterGossipSilences,
 		"AMReloadConfig":                  testAMReloadConfig,
 		"AMZeroDowntimeRollingDeployment": testAMZeroDowntimeRollingDeployment,
+		"AMAlertmanagerConfigCRD":         testAlertmanagerConfigCRD,
+		"AMUserDefinedAlertmanagerConfig": testUserDefinedAlertmanagerConfig,
+		"AMPreserveUserAddedMetadata":     testAMPreserveUserAddedMetadata,
 	}
 
 	for name, f := range testFuncs {
@@ -179,11 +162,13 @@ func testAllNSAlertmanager(t *testing.T) {
 func testAllNSPrometheus(t *testing.T) {
 	skipPrometheusTests(t)
 	testFuncs := map[string]func(t *testing.T){
+		"PromRemoteWriteWithTLS":                 testPromRemoteWriteWithTLS,
 		"PromCreateDeleteCluster":                testPromCreateDeleteCluster,
 		"PromScaleUpDownCluster":                 testPromScaleUpDownCluster,
 		"PromNoServiceMonitorSelector":           testPromNoServiceMonitorSelector,
 		"PromVersionMigration":                   testPromVersionMigration,
 		"PromResourceUpdate":                     testPromResourceUpdate,
+		"PromStorageLabelsAnnotations":           testPromStorageLabelsAnnotations,
 		"PromStorageUpdate":                      testPromStorageUpdate,
 		"PromReloadConfig":                       testPromReloadConfig,
 		"PromAdditionalScrapeConfig":             testPromAdditionalScrapeConfig,
@@ -197,6 +182,8 @@ func testAllNSPrometheus(t *testing.T) {
 		"PromOnlyUpdatedOnRelevantChanges":       testPromOnlyUpdatedOnRelevantChanges,
 		"PromWhenDeleteCRDCleanUpViaOwnerRef":    testPromWhenDeleteCRDCleanUpViaOwnerRef,
 		"PromDiscovery":                          testPromDiscovery,
+		"ShardingProvisioning":                   testShardingProvisioning,
+		"Resharding":                             testResharding,
 		"PromAlertmanagerDiscovery":              testPromAlertmanagerDiscovery,
 		"PromExposingWithKubernetesAPI":          testPromExposingWithKubernetesAPI,
 		"PromDiscoverTargetPort":                 testPromDiscoverTargetPort,
@@ -205,6 +192,10 @@ func testAllNSPrometheus(t *testing.T) {
 		"PromArbitraryFSAcc":                     testPromArbitraryFSAcc,
 		"PromTLSConfigViaSecret":                 testPromTLSConfigViaSecret,
 		"Thanos":                                 testThanos,
+		"PromStaticProbe":                        testPromStaticProbe,
+		"PromSecurePodMonitor":                   testPromSecurePodMonitor,
+		"PromSharedResourcesReconciliation":      testPromSharedResourcesReconciliation,
+		"PromPreserveUserAddedMetadata":          testPromPreserveUserAddedMetadata,
 	}
 
 	for name, f := range testFuncs {
@@ -215,7 +206,9 @@ func testAllNSPrometheus(t *testing.T) {
 func testAllNSThanosRuler(t *testing.T) {
 	skipThanosRulerTests(t)
 	testFuncs := map[string]func(t *testing.T){
-		"ThanosRulerCreateDeleteCluster": testTRCreateDeleteCluster,
+		"ThanosRulerCreateDeleteCluster":                testThanosRulerCreateDeleteCluster,
+		"ThanosRulerPrometheusRuleInDifferentNamespace": testThanosRulerPrometheusRuleInDifferentNamespace,
+		"ThanosRulerPreserveUserAddedMetadata":          testTRPreserveUserAddedMetadata,
 	}
 	for name, f := range testFuncs {
 		t.Run(name, f)
@@ -240,6 +233,7 @@ func TestDenylist(t *testing.T) {
 	testFuncs := map[string]func(t *testing.T){
 		"Prometheus":     testDenyPrometheus,
 		"ServiceMonitor": testDenyServiceMonitor,
+		"ThanosRuler":    testDenyThanosRuler,
 	}
 
 	for name, f := range testFuncs {
@@ -251,9 +245,10 @@ func TestDenylist(t *testing.T) {
 func TestPromInstanceNs(t *testing.T) {
 	skipPrometheusTests(t)
 	testFuncs := map[string]func(t *testing.T){
-		"AllNs":     testPrometheusInstanceNamespaces_AllNs,
-		"AllowList": testPrometheusInstanceNamespaces_AllowList,
-		"DenyList":  testPrometheusInstanceNamespaces_DenyList,
+		"AllNs":             testPrometheusInstanceNamespacesAllNs,
+		"AllowList":         testPrometheusInstanceNamespacesAllowList,
+		"DenyList":          testPrometheusInstanceNamespacesDenyList,
+		"NamespaceNotFound": testPrometheusInstanceNamespacesNamespaceNotFound,
 	}
 
 	for name, f := range testFuncs {
@@ -265,11 +260,32 @@ func TestPromInstanceNs(t *testing.T) {
 func TestAlertmanagerInstanceNs(t *testing.T) {
 	skipAlertmanagerTests(t)
 	testFuncs := map[string]func(t *testing.T){
-		"AllNs":  testAlertmanagerInstanceNamespaces_AllNs,
-		"DenyNs": testAlertmanagerInstanceNamespaces_DenyNs,
+		"AllNs":     testAlertmanagerInstanceNamespacesAllNs,
+		"AllowList": testAlertmanagerInstanceNamespacesAllowList,
+		"DenyNs":    testAlertmanagerInstanceNamespacesDenyNs,
 	}
 
 	for name, f := range testFuncs {
 		t.Run(name, f)
+	}
+}
+
+const (
+	prometheusOperatorServiceName = "prometheus-operator"
+)
+
+func testServerTLS(t *testing.T, namespace string) func(t *testing.T) {
+
+	return func(t *testing.T) {
+		if err := operatorFramework.WaitForServiceReady(framework.KubeClient, namespace, prometheusOperatorServiceName); err != nil {
+			t.Fatal("waiting for prometheus operator service: ", err)
+		}
+
+		operatorService := framework.KubeClient.CoreV1().Services(namespace)
+		request := operatorService.ProxyGet("https", prometheusOperatorServiceName, "https", "/healthz", make(map[string]string))
+		_, err := request.DoRaw(context.TODO())
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }

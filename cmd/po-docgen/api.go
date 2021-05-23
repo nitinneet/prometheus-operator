@@ -26,12 +26,19 @@ import (
 )
 
 const (
-	firstParagraph = `<br>
-<div class="alert alert-info" role="alert">
-    <i class="fa fa-exclamation-triangle"></i><b> Note:</b> Starting with v0.12.0, Prometheus Operator requires use of Kubernetes v1.7.x and up.
-</div>
-
-# API Docs
+	firstParagraph = `---
+title: "API"
+description: "Generated API docs for the Prometheus Operator"
+lead: ""
+date: 2021-03-08T08:49:31+00:00
+draft: false
+images: []
+menu:
+  docs:
+    parent: "operator"
+weight: 1000
+toc: true
+---
 
 This Document documents the types introduced by the Prometheus Operator to be consumed by users.
 
@@ -48,9 +55,11 @@ var (
 		"v1.SecretKeySelector":     "https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.17/#secretkeyselector-v1-core",
 		"v1.PersistentVolumeClaim": "https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.17/#persistentvolumeclaim-v1-core",
 		"v1.EmptyDirVolumeSource":  "https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.17/#emptydirvolumesource-v1-core",
+		"apiextensionsv1.JSON":     "https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.17/#json-v1-apiextensions-k8s-io",
 	}
 
 	selfLinks = map[string]string{}
+	typesDoc  = map[string]KubeTypes{}
 )
 
 func toSectionLink(name string) string {
@@ -76,9 +85,10 @@ func printAPIDocs(paths []string) {
 	for _, t := range types {
 		strukt := t[0]
 		selfLinks[strukt.Name] = "#" + strings.ToLower(strukt.Name)
+		typesDoc[toLink(strukt.Name)] = t[1:]
 	}
 
-	// we need to parse once more to now add the self links
+	// we need to parse once more to now add the self links and the inlined fields
 	types = ParseDocumentationFrom(paths)
 
 	printTOC(types)
@@ -90,7 +100,7 @@ func printAPIDocs(paths []string) {
 
 			fmt.Println("| Field | Description | Scheme | Required |")
 			fmt.Println("| ----- | ----------- | ------ | -------- |")
-			fields := t[1:(len(t))]
+			fields := t[1:]
 			for _, f := range fields {
 				fmt.Println("|", f.Name, "|", f.Doc, "|", f.Type, "|", f.Mandatory, "|")
 			}
@@ -125,6 +135,15 @@ func ParseDocumentationFrom(srcs []string) []KubeTypes {
 				ks = append(ks, Pair{kubType.Name, fmtRawDoc(kubType.Doc), "", false})
 
 				for _, field := range structType.Fields.List {
+					// Treat inlined fields separately as we don't want the original types to appear in the doc.
+					if isInlined(field) {
+						// Skip external types, as we don't want their content to be part of the API documentation.
+						if isInternalType(field.Type) {
+							ks = append(ks, typesDoc[fieldType(field.Type)]...)
+						}
+						continue
+					}
+
 					typeString := fieldType(field.Type)
 					fieldMandatory := fieldRequired(field)
 					if n := fieldName(field); n != "-" {
@@ -215,18 +234,32 @@ func wrapInLink(text, link string) string {
 	return fmt.Sprintf("[%s](%s)", text, link)
 }
 
+func isInlined(field *ast.Field) bool {
+	jsonTag := reflect.StructTag(field.Tag.Value[1 : len(field.Tag.Value)-1]).Get("json") // Delete first and last quotation
+	return strings.Contains(jsonTag, "inline")
+}
+
+func isInternalType(typ ast.Expr) bool {
+	switch typ := typ.(type) {
+	case *ast.SelectorExpr:
+		pkg := typ.X.(*ast.Ident)
+		return strings.HasPrefix(pkg.Name, "monitoring")
+	case *ast.StarExpr:
+		return isInternalType(typ.X)
+	case *ast.ArrayType:
+		return isInternalType(typ.Elt)
+	case *ast.MapType:
+		return isInternalType(typ.Key) && isInternalType(typ.Value)
+	default:
+		return true
+	}
+}
+
 // fieldName returns the name of the field as it should appear in JSON format
 // "-" indicates that this field is not part of the JSON representation
 func fieldName(field *ast.Field) string {
-	jsonTag := ""
-	if field.Tag != nil {
-		jsonTag = reflect.StructTag(field.Tag.Value[1 : len(field.Tag.Value)-1]).Get("json") // Delete first and last quotation
-		if strings.Contains(jsonTag, "inline") {
-			return "-"
-		}
-	}
-
-	jsonTag = strings.Split(jsonTag, ",")[0] // This can return "-"
+	jsonTag := reflect.StructTag(field.Tag.Value[1 : len(field.Tag.Value)-1]).Get("json") // Delete first and last quotation
+	jsonTag = strings.Split(jsonTag, ",")[0]                                              // This can return "-"
 	if jsonTag == "" {
 		if field.Names != nil {
 			return field.Names[0].Name
@@ -248,21 +281,19 @@ func fieldRequired(field *ast.Field) bool {
 }
 
 func fieldType(typ ast.Expr) string {
-	switch typ.(type) {
+	switch typ := typ.(type) {
 	case *ast.Ident:
-		return toLink(typ.(*ast.Ident).Name)
+		return toLink(typ.Name)
 	case *ast.StarExpr:
-		return "*" + toLink(fieldType(typ.(*ast.StarExpr).X))
+		return "*" + toLink(fieldType(typ.X))
 	case *ast.SelectorExpr:
-		e := typ.(*ast.SelectorExpr)
-		pkg := e.X.(*ast.Ident)
-		t := e.Sel
+		pkg := typ.X.(*ast.Ident)
+		t := typ.Sel
 		return toLink(pkg.Name + "." + t.Name)
 	case *ast.ArrayType:
-		return "[]" + toLink(fieldType(typ.(*ast.ArrayType).Elt))
+		return "[]" + toLink(fieldType(typ.Elt))
 	case *ast.MapType:
-		mapType := typ.(*ast.MapType)
-		return "map[" + toLink(fieldType(mapType.Key)) + "]" + toLink(fieldType(mapType.Value))
+		return "map[" + toLink(fieldType(typ.Key)) + "]" + toLink(fieldType(typ.Value))
 	default:
 		return ""
 	}

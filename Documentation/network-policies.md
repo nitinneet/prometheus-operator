@@ -1,6 +1,6 @@
 <br>
 <div class="alert alert-info" role="alert">
-    <i class="fa fa-exclamation-triangle"></i><b> Note:</b> Starting with v0.12.0, Prometheus Operator requires use of Kubernetes v1.7.x and up.
+    <i class="fa fa-exclamation-triangle"></i><b> Note:</b> Starting with v0.39.0, Prometheus Operator requires use of Kubernetes v1.16.x and up.
 </div>
 
 # Network policies
@@ -66,7 +66,7 @@ spec:
   podSelector:
     matchLabels:
       alertmanager: main
-      app: alertmanager
+      app.kubernetes.io/name: alertmanager
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -93,7 +93,7 @@ spec:
   podSelector:
     matchLabels:
       alertmanager: main
-      app: alertmanager
+      app.kubernetes.io/name: alertmanager
 
 ```
 
@@ -134,7 +134,7 @@ spec:
       protocol: TCP
   podSelector:
     matchLabels:
-      app: prometheus
+      app.kubernetes.io/name: prometheus
       prometheus: k8s
 ```
 

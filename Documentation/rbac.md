@@ -1,11 +1,18 @@
-<br>
-<div class="alert alert-info" role="alert">
-    <i class="fa fa-exclamation-triangle"></i><b> Note:</b> Starting with v0.12.0, Prometheus Operator requires use of Kubernetes v1.7.x and up.
-</div>
+---
+title: "RBAC"
+description: "High Availability is a must for the monitoring infrastructure."
+lead: ""
+date: 2021-03-08T08:49:31+00:00
+draft: false
+images: []
+menu:
+  docs:
+    parent: "operator"
+weight: 400
+toc: true
+---
 
-# RBAC
-
-RBAC for the Prometheus Operator involves two parts, RBAC rules for the Operator itself and RBAC rules for the Prometheus Pods themselves created by the Operator as Prometheus requires access to the Kubernetes API for target and Alertmanager discovery.
+[Role-based access control](https://en.wikipedia.org/wiki/Role-based_access_control) (RBAC) for the Prometheus Operator involves two parts, RBAC rules for the Operator itself and RBAC rules for the Prometheus Pods themselves created by the Operator as Prometheus requires access to the Kubernetes API for target and Alertmanager discovery.
 
 ## Prometheus Operator RBAC
 
@@ -21,40 +28,22 @@ metadata:
   labels:
     app.kubernetes.io/component: controller
     app.kubernetes.io/name: prometheus-operator
-    app.kubernetes.io/version: v0.38.0
+    app.kubernetes.io/version: 0.47.1
   name: prometheus-operator
 rules:
-- apiGroups:
-  - apiextensions.k8s.io
-  resources:
-  - customresourcedefinitions
-  verbs:
-  - create
-- apiGroups:
-  - apiextensions.k8s.io
-  resourceNames:
-  - alertmanagers.monitoring.coreos.com
-  - podmonitors.monitoring.coreos.com
-  - prometheuses.monitoring.coreos.com
-  - prometheusrules.monitoring.coreos.com
-  - servicemonitors.monitoring.coreos.com
-  - thanosrulers.monitoring.coreos.com
-  resources:
-  - customresourcedefinitions
-  verbs:
-  - get
-  - update
 - apiGroups:
   - monitoring.coreos.com
   resources:
   - alertmanagers
   - alertmanagers/finalizers
+  - alertmanagerconfigs
   - prometheuses
   - prometheuses/finalizers
   - thanosrulers
   - thanosrulers/finalizers
   - servicemonitors
   - podmonitors
+  - probes
   - prometheusrules
   verbs:
   - '*'
@@ -104,17 +93,27 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+  - watch
 ```
 
 > Note: A cluster admin is required to create this `ClusterRole` and create a `ClusterRoleBinding` or `RoleBinding` to the `ServiceAccount` used by the Prometheus Operator `Pod`. The `ServiceAccount` used by the Prometheus Operator `Pod` can be specified in the `Deployment` object used to deploy it.
 
-When the Prometheus Operator boots up for the first time it registers the `customresourcedefinitions` it uses, therefore the `create` action on those is required.
-
-As the Prometheus Operator works extensively with the `customresourcedefinitions` it registers, it requires all actions on those objects. Those are:
+As the Prometheus Operator works extensively with its `customresourcedefinitions`, it requires all actions on those objects. Those are:
 
 * `alertmanagers`
+* `podmonitors`
+* `probes`
 * `prometheuses`
+* `prometheusrules`
 * `servicemonitors`
+* `thanosrulers`
 
 Alertmanager and Prometheus clusters are created using `statefulsets` therefore all changes to an Alertmanager or Prometheus object result in a change to the `statefulsets`, which means all actions must be permitted.
 
@@ -144,6 +143,7 @@ rules:
 - apiGroups: [""]
   resources:
   - nodes
+  - nodes/metrics
   - services
   - endpoints
   - pods
@@ -152,6 +152,11 @@ rules:
   resources:
   - configmaps
   verbs: ["get"]
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs: ["get", "list", "watch"]
 - nonResourceURLs: ["/metrics"]
   verbs: ["get"]
 ```
@@ -172,7 +177,7 @@ metadata:
   labels:
     app.kubernetes.io/component: controller
     app.kubernetes.io/name: prometheus-operator
-    app.kubernetes.io/version: v0.38.0
+    app.kubernetes.io/version: 0.47.1
   name: prometheus-operator
   namespace: default
 ```
@@ -189,7 +194,7 @@ metadata:
   labels:
     app.kubernetes.io/component: controller
     app.kubernetes.io/name: prometheus-operator
-    app.kubernetes.io/version: v0.38.0
+    app.kubernetes.io/version: 0.47.1
   name: prometheus-operator
 roleRef:
   apiGroup: rbac.authorization.k8s.io

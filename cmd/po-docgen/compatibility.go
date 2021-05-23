@@ -17,16 +17,23 @@ package main
 import (
 	"fmt"
 
-	"github.com/coreos/prometheus-operator/pkg/operator"
+	"github.com/prometheus-operator/prometheus-operator/pkg/operator"
 )
 
 func printCompatMatrixDocs() {
-	fmt.Println(`<br>
-<div class="alert alert-info" role="alert">
-    <i class="fa fa-exclamation-triangle"></i><b> Note:</b> Starting with v0.12.0, Prometheus Operator requires use of Kubernetes v1.7.x and up.
-</div>
-
-# Compatibility
+	fmt.Println(`---
+title: "Compatibility"
+description: "The Prometheus Operator supports a number of Kubernetes and Prometheus releases."
+lead: ""
+date: 2021-03-08T08:49:31+00:00
+draft: false
+images: []
+menu:
+  docs:
+    parent: "operator"
+weight: 200
+toc: true
+---
 
 The Prometheus Operator supports a number of Kubernetes and Prometheus releases.
 
@@ -35,6 +42,8 @@ The Prometheus Operator supports a number of Kubernetes and Prometheus releases.
 The Prometheus Operator uses client-go to communicate with Kubernetes clusters. The supported Kubernetes cluster version is determined by client-go. The compatibility matrix for client-go and Kubernetes clusters can be found [here](https://github.com/kubernetes/client-go#compatibility-matrix). All additional compatibility is only best effort, or happens to still/already be supported. The currently used client-go version is "v4.0.0-beta.0".
 
 Due to the use of CustomResourceDefinitions Kubernetes >= v1.7.0 is required.
+
+Due to the use of apiextensions.k8s.io/v1 CustomResourceDefinitions, prometheus-operator v0.39.0 onward requires Kubernetes >= v1.16.0.
 
 ## Prometheus
 

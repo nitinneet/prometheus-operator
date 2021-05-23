@@ -1,6 +1,6 @@
 <br>
 <div class="alert alert-info" role="alert">
-    <i class="fa fa-exclamation-triangle"></i><b> Note:</b> Starting with v0.12.0, Prometheus Operator requires use of Kubernetes v1.7.x and up.
+    <i class="fa fa-exclamation-triangle"></i><b> Note:</b> Starting with v0.39.0, Prometheus Operator requires use of Kubernetes v1.16.x and up.
 </div>
 
 # Exposing Prometheus and Alertmanager
@@ -214,7 +214,7 @@ metadata:
   name: monitoring
   annotations:
     ingress.kubernetes.io/whitelist-source-range: 10.0.0.0/16 # change this range to admin IPs
-    ingress.kubernetes.io/rewrite-target: "/"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
 spec:
   rules:
   - http:
@@ -222,11 +222,11 @@ spec:
       - backend:
           serviceName: prometheus-main
           servicePort: 9090
-        path: /prometheus
+        path: /prometheus(/|$)(.*)
       - backend:
           serviceName: alertmanager-main
           servicePort: 9093
-        path: /alertmanager
+        path: /alertmanager(/|$)(.*)
 ```
 
 Finally, the Prometheus and `Alertmanager` objects must be created, specifying the `externalUrl` at which they will be found.
